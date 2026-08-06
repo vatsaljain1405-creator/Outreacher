@@ -1,27 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #161413; /* Deep warm Japandi black */
+  --foreground: #FAF8F5; /* Warm cream text */
+  --font-serif: 'Lora', serif;
+  --font-sans: 'Plus Jakarta Sans', sans-serif;
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
+h1, h2, h3, h4, h5, h6, .font-serif {
+  font-family: var(--font-serif) !important;
+}
+
+/* Staggered animation delay helpers */
+.animation-delay-75 {
+  animation-delay: 75ms;
+}
+.animation-delay-150 {
+  animation-delay: 150ms;
+}
+.animation-delay-225 {
+  animation-delay: 225ms;
+}
+.animation-delay-300 {
+  animation-delay: 300ms;
+}
+.animation-delay-450 {
+  animation-delay: 450ms;
+}
+
+/* Make animation fill-mode forwards by default for setup */
+.animate-slide-up, .animate-scale-up, .animate-fade-in, .animate-slide-down {
+  animation-fill-mode: forwards;
 }

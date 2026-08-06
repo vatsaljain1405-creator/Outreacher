@@ -1,0 +1,1 @@
+ALTER TABLE `campaign` ADD `templateId` text;
