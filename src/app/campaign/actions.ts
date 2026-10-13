@@ -16,6 +16,8 @@ export interface ImportResult {
   error?: string
 }
 
+import { detectEmailHeader } from "@/lib/email-detector"
+
 /**
  * Creates a campaign and persists recipients in SQLite in batches of 100.
  */
@@ -41,7 +43,8 @@ export async function createCampaignAction(
       return { success: false, error: "Headers are empty. Could not import." }
     }
 
-    const emailHeader = headers.find((h) => h.toLowerCase() === "email") || headers[0]
+    const emailHeader = detectEmailHeader(headers, rows)
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
     const [newCampaign] = await db
       .insert(campaigns)
@@ -56,12 +59,25 @@ export async function createCampaignAction(
 
     const campaignId = newCampaign.id
 
-    const recipientValues = rows.map((row) => ({
-      campaignId,
-      email: row[emailHeader] || "no-email",
-      fields: row,
-      status: "pending",
-    }))
+    const recipientValues = rows.map((row) => {
+      let candidate = (row[emailHeader] || "").trim()
+      // If candidate is not a valid email, check if any other field contains a valid email
+      if (!emailRegex.test(candidate)) {
+        for (const val of Object.values(row)) {
+          if (typeof val === "string" && emailRegex.test(val.trim())) {
+            candidate = val.trim()
+            break
+          }
+        }
+      }
+
+      return {
+        campaignId,
+        email: candidate || "no-email",
+        fields: row,
+        status: "pending",
+      }
+    })
 
     const chunkSize = 100
     for (let i = 0; i < recipientValues.length; i += chunkSize) {
@@ -642,15 +658,28 @@ export async function createFollowupCampaignAction(
     const campaignId = newCampaign.id
 
     // 5. Insert new recipients carrying over the gmailThreadId / gmailMessageId for threading
-    const newRecipientValues = matchingRecipients.map((r) => ({
-      campaignId,
-      email: r.email,
-      fields: r.fields,
-      status: "pending",
-      // Thread follow-up under original thread if available
-      gmailThreadId: r.gmailThreadId || null,
-      gmailMessageId: r.gmailMessageId || null,
-    }))
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    const newRecipientValues = matchingRecipients.map((r) => {
+      let candidate = (r.email || "").trim()
+      if (!emailRegex.test(candidate) && r.fields && typeof r.fields === "object") {
+        for (const val of Object.values(r.fields as Record<string, unknown>)) {
+          if (typeof val === "string" && emailRegex.test(val.trim())) {
+            candidate = val.trim()
+            break
+          }
+        }
+      }
+
+      return {
+        campaignId,
+        email: candidate || "no-email",
+        fields: r.fields,
+        status: "pending",
+        // Thread follow-up under original thread if available
+        gmailThreadId: r.gmailThreadId || null,
+        gmailMessageId: r.gmailMessageId || null,
+      }
+    })
 
     const chunkSize = 100
     for (let i = 0; i < newRecipientValues.length; i += chunkSize) {

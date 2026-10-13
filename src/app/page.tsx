@@ -3,6 +3,7 @@ import { db } from "@/db"
 import { campaigns, recipients, events } from "@/db/schema"
 import { eq, desc, count, and, or } from "drizzle-orm"
 import DashboardClient from "./DashboardClient"
+import { getActiveBaseUrl } from "@/lib/base-url"
 
 export default async function Home() {
   const session = await auth()
@@ -103,7 +104,7 @@ export default async function Home() {
     )
   const totalReplied = totalRepliedResult?.count || 0
 
-  // 5. Recent Campaigns (up to 5 recent)
+  // 5. All Campaigns
   const recentCampaignsList = await db
     .select({
       id: campaigns.id,
@@ -114,7 +115,6 @@ export default async function Home() {
     .from(campaigns)
     .where(eq(campaigns.userId, userId))
     .orderBy(desc(campaigns.createdAt))
-    .limit(5)
 
   const campaignsWithCounts = await Promise.all(
     recentCampaignsList.map(async (c) => {
@@ -167,7 +167,7 @@ export default async function Home() {
     .orderBy(desc(events.createdAt))
     .limit(30)
 
-  const isLocalhost = process.env.NEXTAUTH_URL?.includes("localhost") || false
+  const { isLocalhost } = await getActiveBaseUrl()
 
   return (
     <DashboardClient

@@ -5,6 +5,8 @@ import * as XLSX from "xlsx"
 import { useSearchParams } from "next/navigation"
 import { useEditor, EditorContent } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
+import Link from "@tiptap/extension-link"
+import { getProfessionalFooterHtml, hasProfessionalFooter } from "@/lib/footer"
 import {
   createCampaignAction,
   importGoogleSheetAction,
@@ -59,6 +61,7 @@ interface TemplateProfile {
   body: string
   fallbacks: Record<string, string>
   unsubscribeEnabled?: boolean
+  footerEnabled?: boolean
   attachments?: Array<{ name: string; mimeType: string; size: number; content: string }>
 }
 
@@ -286,6 +289,11 @@ export default function CampaignPage() {
   const [dashboardRecipients, setDashboardRecipients] = useState<RecipientRow[]>([])
   const [loadingRecipients, setLoadingRecipients] = useState(false)
 
+  // Campaign search & pagination states
+  const [campaignSearch, setCampaignSearch] = useState("")
+  const [currentPage, setCurrentPage] = useState(1)
+  const itemsPerPage = 5
+
   const searchParams = useSearchParams()
   const campaignIdParam = searchParams.get("id")
 
@@ -309,6 +317,10 @@ export default function CampaignPage() {
   const [bodyHtml, setBodyHtml] = useState("<p>Dear {First Name},</p><p>We are excited to work with you at {Company}!</p>")
   const [fallbacks, setFallbacks] = useState<Record<string, string>>({})
   const [unsubscribeEnabled, setUnsubscribeEnabled] = useState(false)
+  const [footerEnabled, setFooterEnabled] = useState(true)
+  const [isLinkModalOpen, setIsLinkModalOpen] = useState(false)
+  const [linkUrl, setLinkUrl] = useState("")
+  const [linkText, setLinkText] = useState("")
   const [attachmentsList, setAttachmentsList] = useState<Array<{ name: string; mimeType: string; size: number; content: string }>>([])
   const [recipientsList, setRecipientsList] = useState<RecipientRow[]>([])
   const [selectedRecipientId, setSelectedRecipientId] = useState<string>("")
@@ -324,9 +336,21 @@ export default function CampaignPage() {
   const [loading, setLoading] = useState(false)
   const [statusMessage, setStatusMessage] = useState<{ success: boolean; text: string } | null>(null)
 
-  // TipTap Rich Editor Setup
+  // TipTap Rich Editor Setup with Link extension (autolink enabled)
   const editor = useEditor({
-    extensions: [StarterKit],
+    extensions: [
+      StarterKit,
+      Link.configure({
+        openOnClick: false,
+        autolink: true,
+        defaultProtocol: "https",
+        HTMLAttributes: {
+          target: "_blank",
+          rel: "noopener noreferrer",
+          class: "text-indigo-400 underline font-medium cursor-pointer",
+        },
+      }),
+    ],
     content: bodyHtml,
     editorProps: {
       attributes: {
@@ -337,6 +361,62 @@ export default function CampaignPage() {
       setBodyHtml(editor.getHTML())
     },
   })
+
+  // Open Link Modal with pre-filled selection or active URL
+  const handleOpenLinkModal = () => {
+    if (!editor) return
+    const previousUrl = editor.getAttributes("link").href || ""
+    const { from, to } = editor.state.selection
+    const selectedText = editor.state.doc.textBetween(from, to, " ")
+    setLinkUrl(previousUrl)
+    setLinkText(selectedText)
+    setIsLinkModalOpen(true)
+  }
+
+  // Insert or Update Link in Editor
+  const handleSaveLink = () => {
+    if (!editor) return
+    if (!linkUrl.trim()) {
+      editor.chain().focus().extendMarkRange("link").unsetLink().run()
+      setIsLinkModalOpen(false)
+      return
+    }
+
+    let formattedUrl = linkUrl.trim()
+    if (
+      !formattedUrl.match(/^https?:\/\//i) &&
+      !formattedUrl.startsWith("mailto:") &&
+      !formattedUrl.startsWith("tel:")
+    ) {
+      formattedUrl = `https://${formattedUrl}`
+    }
+
+    const { from, to } = editor.state.selection
+    const hasSelection = from !== to
+
+    if (hasSelection) {
+      editor.chain().focus().extendMarkRange("link").setLink({ href: formattedUrl }).run()
+    } else if (linkText.trim()) {
+      editor.chain().focus().insertContent(`<a href="${formattedUrl}">${linkText.trim()}</a>`).run()
+    } else {
+      editor.chain().focus().insertContent(`<a href="${formattedUrl}">${formattedUrl}</a>`).run()
+    }
+    setIsLinkModalOpen(false)
+  }
+
+  // Unset / Remove Link
+  const handleRemoveLink = () => {
+    if (!editor) return
+    editor.chain().focus().extendMarkRange("link").unsetLink().run()
+    setIsLinkModalOpen(false)
+  }
+
+  // Insert corporate signature directly into editor body
+  const handleInsertProfessionalFooter = () => {
+    if (!editor) return
+    const footerHtml = getProfessionalFooterHtml({ forEmail: false })
+    editor.chain().focus().insertContent(`<p><br /></p>${footerHtml}`).run()
+  }
 
   // Synchronize editor content when changing template profile
   useEffect(() => {
@@ -359,6 +439,7 @@ export default function CampaignPage() {
     if (campaignIdParam) {
       handleOpenCampaignWizard(campaignIdParam)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaignIdParam, campaignsList.length])
 
   // Automatically load follow-up wizard if parentCampaignId is present in URL query searchParams
@@ -366,6 +447,7 @@ export default function CampaignPage() {
     if (parentCampaignIdParam && campaignsList.length > 0) {
       handleStartFollowup(parentCampaignIdParam)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [parentCampaignIdParam, campaignsList.length])
 
   // Poll campaigns list if any campaign is in scheduled status (sending/scheduled)
@@ -408,6 +490,20 @@ export default function CampaignPage() {
       setLoading(false)
     }
   }
+
+  // Filtered & Paginated campaigns
+  const filteredCampaigns = useMemo(() => {
+    return campaignsList.filter((c) =>
+      c.name.toLowerCase().includes(campaignSearch.toLowerCase())
+    )
+  }, [campaignsList, campaignSearch])
+
+  const totalPages = Math.ceil(filteredCampaigns.length / itemsPerPage) || 1
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const paginatedCampaigns = useMemo(() => {
+    return filteredCampaigns.slice(startIndex, endIndex)
+  }, [filteredCampaigns, startIndex, endIndex])
 
   const handleSelectDashboardCampaign = async (campaignId: string) => {
     setSelectedDashboardCampaignId(campaignId)
@@ -464,6 +560,7 @@ export default function CampaignPage() {
             setBodyHtml(campaignTemplate.body)
             setFallbacks(campaignTemplate.fallbacks || {})
             setUnsubscribeEnabled(campaignTemplate.unsubscribeEnabled || false)
+            setFooterEnabled(campaignTemplate.footerEnabled !== false)
             setAttachmentsList(campaignTemplate.attachments || [])
           } else {
             // Reset editor inputs to defaults (fresh template)
@@ -473,6 +570,7 @@ export default function CampaignPage() {
             setBodyHtml("<p>Dear {First Name},</p><p>We are excited to work with you at {Company}!</p>")
             setFallbacks({})
             setUnsubscribeEnabled(false)
+            setFooterEnabled(true)
             setAttachmentsList([])
           }
         }
@@ -720,6 +818,7 @@ export default function CampaignPage() {
       setBodyHtml("<p>Dear {First Name},</p><p>We are excited to work with you at {Company}!</p>")
       setFallbacks({})
       setUnsubscribeEnabled(false)
+      setFooterEnabled(true)
       setAttachmentsList([])
       return
     }
@@ -737,6 +836,7 @@ export default function CampaignPage() {
       setBodyHtml(tpl.body)
       setFallbacks(tpl.fallbacks || {})
       setUnsubscribeEnabled(tpl.unsubscribeEnabled || false)
+      setFooterEnabled(tpl.footerEnabled !== false)
       setAttachmentsList(tpl.attachments || [])
     }
   }
@@ -758,7 +858,8 @@ export default function CampaignPage() {
         bodyHtml,
         fallbacks,
         unsubscribeEnabled,
-        attachmentsList
+        attachmentsList,
+        footerEnabled
       )
 
       if (res.success) {
@@ -825,7 +926,8 @@ export default function CampaignPage() {
         bodyHtml,
         fallbacks,
         unsubscribeEnabled,
-        attachmentsList
+        attachmentsList,
+        footerEnabled
       )
       if (res.success) {
         if (res.templateId) {
@@ -901,6 +1003,22 @@ export default function CampaignPage() {
 
   const mergedSubjectPreview = mergePreviewText(subject)
   const mergedBodyPreview = mergePreviewText(bodyHtml)
+
+  const previewBodyHtml = useMemo(() => {
+    let html = mergedBodyPreview || ""
+    if (footerEnabled && !hasProfessionalFooter(html)) {
+      html += `\n` + getProfessionalFooterHtml({ forEmail: false })
+    }
+    if (unsubscribeEnabled) {
+      html += `
+        <div style="margin-top: 30px; padding-top: 15px; border-top: 1px solid #334155; text-align: center; font-family: sans-serif; font-size: 11px; color: #94a3b8;">
+          You are receiving this because you are on our list. 
+          <a href="#" style="color: #818cf8; text-decoration: underline; margin-left: 5px;">Unsubscribe here</a>
+        </div>
+      `
+    }
+    return html
+  }, [mergedBodyPreview, footerEnabled, unsubscribeEnabled])
 
   const handleSyncReplies = async () => {
     if (!activeCampaignId) return
@@ -1074,7 +1192,21 @@ export default function CampaignPage() {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* List Table */}
             <div className="lg:col-span-8 bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-2xl p-6 shadow-2xl">
-              <h2 className="text-lg font-bold text-slate-200 mb-4">Saved Campaigns</h2>
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4">
+                <h2 className="text-lg font-bold text-slate-200">Saved Campaigns</h2>
+                <div className="w-full sm:w-auto">
+                  <input
+                    type="text"
+                    placeholder="Search campaigns..."
+                    value={campaignSearch}
+                    onChange={(e) => {
+                      setCampaignSearch(e.target.value)
+                      setCurrentPage(1)
+                    }}
+                    className="bg-slate-950 border border-slate-800 text-xs text-slate-200 py-1.5 px-3 rounded-lg focus:outline-none focus:border-indigo-500 font-sans w-full sm:w-[200px]"
+                  />
+                </div>
+              </div>
               
               {loading && campaignsList.length === 0 ? (
                 <div className="py-12 text-center text-slate-500 text-xs">Loading database rows...</div>
@@ -1086,136 +1218,169 @@ export default function CampaignPage() {
                   <p className="text-slate-400 text-sm font-medium">No campaigns found in SQLite database.</p>
                   <p className="text-slate-500 text-xs mt-1">Upload a spreadsheet using the button above to get started.</p>
                 </div>
+              ) : filteredCampaigns.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 text-xs border border-dashed border-slate-850 rounded-xl">
+                  No campaigns found matching &quot;{campaignSearch}&quot;.
+                </div>
               ) : (
-                <div className="overflow-x-auto border border-slate-800/60 rounded-xl bg-slate-950/20">
-                  <table className="w-full text-xs text-left border-collapse">
-                    <thead>
-                      <tr className="bg-slate-950/60 border-b border-slate-850 text-slate-400 font-semibold">
-                        <th className="p-3">Campaign Name</th>
-                        <th className="p-3">Recipients</th>
-                        <th className="p-3">Stats (O/C/R)</th>
-                        <th className="p-3">Status</th>
-                        <th className="p-3">Created</th>
-                        <th className="p-3 text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-850">
-                      {campaignsList.map((c) => (
-                        <tr key={c.id} className="hover:bg-slate-900/40 text-slate-300">
-                          <td 
-                            className="p-3 font-semibold text-slate-200 cursor-pointer hover:text-indigo-400 transition-colors"
-                            onClick={() => handleSelectDashboardCampaign(c.id)}
-                          >
-                            {c.name}
-                          </td>
-                          <td className="p-3 font-mono text-[11px]">{c.recipientCount} rows</td>
-                          <td className="p-3 font-mono text-[11px] text-slate-350">
-                            <div className="flex items-center gap-1.5">
-                              <div>
-                                <span className="text-emerald-400" title="Unique Opens">{c.opensCount || 0} O</span>
-                                <span className="text-slate-500 mx-1">/</span>
-                                <span className="text-indigo-400" title="Unique Clicks">{c.clicksCount || 0} C</span>
-                                <span className="text-slate-500 mx-1">/</span>
-                                <span className="text-pink-400" title="Replies">{c.repliesCount || 0} R</span>
+                <div className="space-y-4">
+                  <div className="overflow-x-auto border border-slate-800/60 rounded-xl bg-slate-950/20">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead>
+                        <tr className="bg-slate-950/60 border-b border-slate-850 text-slate-400 font-semibold">
+                          <th className="p-3">Campaign Name</th>
+                          <th className="p-3">Recipients</th>
+                          <th className="p-3">Stats (O/C/R)</th>
+                          <th className="p-3">Status</th>
+                          <th className="p-3">Created</th>
+                          <th className="p-3 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-850">
+                        {paginatedCampaigns.map((c) => (
+                          <tr key={c.id} className="hover:bg-slate-900/40 text-slate-300">
+                            <td 
+                              className="p-3 font-semibold text-slate-200 cursor-pointer hover:text-indigo-400 transition-colors"
+                              onClick={() => handleSelectDashboardCampaign(c.id)}
+                            >
+                              {c.name}
+                            </td>
+                            <td className="p-3 font-mono text-[11px]">{c.recipientCount} rows</td>
+                            <td className="p-3 font-mono text-[11px] text-slate-350">
+                              <div className="flex items-center gap-1.5">
+                                <div>
+                                  <span className="text-emerald-400" title="Unique Opens">{c.opensCount || 0} O</span>
+                                  <span className="text-slate-500 mx-1">/</span>
+                                  <span className="text-indigo-400" title="Unique Clicks">{c.clicksCount || 0} C</span>
+                                  <span className="text-slate-500 mx-1">/</span>
+                                  <span className="text-pink-400" title="Replies">{c.repliesCount || 0} R</span>
+                                </div>
+                                {c.status === "completed" && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handleDashboardSyncReplies(c.id)
+                                    }}
+                                    disabled={syncingMap[c.id]}
+                                    className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 active:scale-95 transition-all"
+                                    title="Sync Replies from Gmail"
+                                  >
+                                    <svg className={`w-3.5 h-3.5 ${syncingMap[c.id] ? "animate-spin text-indigo-400" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M9 11l3 3L22 4" />
+                                    </svg>
+                                  </button>
+                                )}
                               </div>
-                              {c.status === "completed" && (
+                            </td>
+                            <td className="p-3">
+                              <div className="space-y-1.5 max-w-[140px]">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border uppercase ${
+                                  c.status === "completed"
+                                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                                    : c.status === "scheduled"
+                                    ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
+                                    : "bg-slate-800 border-slate-700 text-slate-400"
+                                }`}>
+                                  {c.status}
+                                  {c.status === "scheduled" && c.scheduledAt && (
+                                    <span className="lowercase text-[9px] text-amber-500 ml-1">
+                                      ({new Date(c.scheduledAt).toLocaleDateString()})
+                                    </span>
+                                  )}
+                                </span>
+
+                                {/* Progress bar for scheduled or completed campaigns */}
+                                {c.status !== "draft" && (
+                                  <div className="space-y-0.5">
+                                    <div className="flex justify-between text-[9px] font-semibold text-slate-400">
+                                      <span>Sent {c.sentCount || 0}/{c.recipientCount}</span>
+                                      {c.failedCount ? (
+                                        <span className="text-rose-455 font-bold" title={`${c.failedCount} failures`}>
+                                          {c.failedCount} F
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full transition-all duration-500 rounded-full ${
+                                          c.status === "completed" ? "bg-emerald-500" : "bg-indigo-500 animate-pulse"
+                                        }`}
+                                        style={{ width: `${Math.min(100, Math.round(((c.sentCount || 0) + (c.failedCount || 0)) / (c.recipientCount || 1) * 100))}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                            <td className="p-3 text-slate-500 font-mono text-[10px]">
+                              {new Date(c.createdAt).toLocaleDateString()}
+                            </td>
+                            <td className="p-3 text-right flex items-center justify-end gap-2">
+                              {c.status === "draft" && (
                                 <button
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    handleDashboardSyncReplies(c.id)
-                                  }}
-                                  disabled={syncingMap[c.id]}
-                                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 active:scale-95 transition-all"
-                                  title="Sync Replies from Gmail"
+                                  onClick={() => handleDeleteCampaign(c.id)}
+                                  disabled={loading}
+                                  className="py-1 px-2.5 rounded-lg bg-rose-500/10 hover:bg-rose-600 border border-rose-500/30 hover:border-rose-550 text-rose-450 hover:text-white transition-all text-xs font-semibold cursor-pointer disabled:opacity-50"
                                 >
-                                  <svg className={`w-3.5 h-3.5 ${syncingMap[c.id] ? "animate-spin text-indigo-400" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M9 11l3 3L22 4" />
-                                  </svg>
+                                  Delete
                                 </button>
                               )}
-                            </div>
-                          </td>
-                          <td className="p-3">
-                            <div className="space-y-1.5 max-w-[140px]">
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border uppercase ${
-                                c.status === "completed"
-                                  ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-                                  : c.status === "scheduled"
-                                  ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
-                                  : "bg-slate-800 border-slate-700 text-slate-400"
-                              }`}>
-                                {c.status}
-                                {c.status === "scheduled" && c.scheduledAt && (
-                                  <span className="lowercase text-[9px] text-amber-500 ml-1">
-                                    ({new Date(c.scheduledAt).toLocaleDateString()})
-                                  </span>
-                                )}
-                              </span>
-
-                              {/* Progress bar for scheduled or completed campaigns */}
-                              {c.status !== "draft" && (
-                                <div className="space-y-0.5">
-                                  <div className="flex justify-between text-[9px] font-semibold text-slate-400">
-                                    <span>Sent {c.sentCount || 0}/{c.recipientCount}</span>
-                                    {c.failedCount ? (
-                                      <span className="text-rose-450 font-bold" title={`${c.failedCount} failures`}>
-                                        {c.failedCount} F
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                  <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                                    <div 
-                                      className={`h-full transition-all duration-500 rounded-full ${
-                                        c.status === "completed" ? "bg-emerald-500" : "bg-indigo-500 animate-pulse"
-                                      }`}
-                                      style={{ width: `${Math.min(100, Math.round(((c.sentCount || 0) + (c.failedCount || 0)) / (c.recipientCount || 1) * 100))}%` }}
-                                    />
-                                  </div>
-                                </div>
+                              {c.status === "scheduled" && (
+                                <button
+                                  onClick={() => handleCancelScheduledCampaign(c.id)}
+                                  disabled={loading}
+                                  className="py-1 px-2.5 rounded-lg bg-amber-500/10 hover:bg-amber-600 border border-amber-500/30 hover:border-amber-550 text-amber-450 hover:text-white transition-all text-xs font-semibold cursor-pointer disabled:opacity-50"
+                                >
+                                  Cancel Schedule
+                                </button>
                               )}
-                            </div>
-                          </td>
-                          <td className="p-3 text-slate-500 font-mono text-[10px]">
-                            {new Date(c.createdAt).toLocaleDateString()}
-                          </td>
-                          <td className="p-3 text-right flex items-center justify-end gap-2">
-                            {c.status === "draft" && (
+                              {c.status === "completed" && (
+                                <button
+                                  onClick={() => handleStartFollowup(c.id)}
+                                  className="py-1 px-2.5 rounded-lg bg-pink-950 hover:bg-pink-900 border border-pink-500/30 hover:border-pink-400 text-pink-300 hover:text-pink-200 transition-all font-semibold text-xs active:scale-95 cursor-pointer"
+                                >
+                                  Create Follow-up
+                                </button>
+                              )}
                               <button
-                                onClick={() => handleDeleteCampaign(c.id)}
-                                disabled={loading}
-                                className="py-1 px-2.5 rounded-lg bg-rose-500/10 hover:bg-rose-600 border border-rose-500/30 hover:border-rose-550 text-rose-450 hover:text-white transition-all text-xs font-semibold"
+                                onClick={() => handleOpenCampaignWizard(c.id)}
+                                className="py-1 px-3 rounded-lg bg-indigo-955 border border-indigo-500/30 hover:border-indigo-400 text-indigo-300 hover:text-indigo-200 transition-all font-semibold cursor-pointer"
                               >
-                                Delete
+                                Setup Wizard
                               </button>
-                            )}
-                            {c.status === "scheduled" && (
-                              <button
-                                onClick={() => handleCancelScheduledCampaign(c.id)}
-                                disabled={loading}
-                                className="py-1 px-2.5 rounded-lg bg-amber-500/10 hover:bg-amber-600 border border-amber-500/30 hover:border-amber-550 text-amber-450 hover:text-white transition-all text-xs font-semibold"
-                              >
-                                Cancel Schedule
-                              </button>
-                            )}
-                            {c.status === "completed" && (
-                              <button
-                                onClick={() => handleStartFollowup(c.id)}
-                                className="py-1 px-2.5 rounded-lg bg-pink-950 hover:bg-pink-900 border border-pink-500/30 hover:border-pink-400 text-pink-300 hover:text-pink-200 transition-all font-semibold text-xs active:scale-95"
-                              >
-                                Create Follow-up
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleOpenCampaignWizard(c.id)}
-                              className="py-1 px-3 rounded-lg bg-indigo-955 border border-indigo-500/30 hover:border-indigo-400 text-indigo-300 hover:text-indigo-200 transition-all font-semibold"
-                            >
-                              Setup Wizard
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Pagination Controls */}
+                  {totalPages > 1 && (
+                    <div className="flex items-center justify-between pt-2 text-xs text-slate-400">
+                      <span>
+                        Showing <strong className="text-slate-200">{startIndex + 1}</strong> to{" "}
+                        <strong className="text-slate-200">{Math.min(endIndex, filteredCampaigns.length)}</strong> of{" "}
+                        <strong className="text-slate-200">{filteredCampaigns.length}</strong> campaigns
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                          disabled={currentPage === 1}
+                          className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-750 hover:text-white disabled:opacity-40 disabled:hover:text-slate-400 transition-all font-semibold cursor-pointer disabled:cursor-not-allowed"
+                        >
+                          Previous
+                        </button>
+                        <button
+                          onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                          disabled={currentPage === totalPages}
+                          className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-750 hover:text-white disabled:opacity-40 disabled:hover:text-slate-400 transition-all font-semibold cursor-pointer disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1753,6 +1918,30 @@ export default function CampaignPage() {
                           {"{"}{header}{"}"}
                         </button>
                       ))}
+
+                      <span className="h-5 w-px bg-slate-800 self-center mx-1" />
+
+                      <button
+                        type="button"
+                        onClick={handleOpenLinkModal}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-950/70 border border-indigo-500/40 hover:border-indigo-400 text-indigo-300 font-sans text-[11px] font-medium hover:text-white transition-colors shadow-sm"
+                        title="Attach a direct link or LinkedIn profile"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                        </svg>
+                        <span>Attach Link</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleInsertProfessionalFooter}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-900 border border-slate-750 hover:border-slate-600 text-slate-300 font-sans text-[11px] font-medium hover:text-white transition-colors shadow-sm"
+                        title="Insert India Accelerator corporate signature into body"
+                      >
+                        <span>🖋️</span>
+                        <span>Insert Footer</span>
+                      </button>
                     </div>
                   </div>
 
@@ -1774,9 +1963,14 @@ export default function CampaignPage() {
 
                   {/* TipTap Rich Body Editor */}
                   <div>
-                    <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-                      Email Body (Rich HTML Layout)
-                    </label>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                        Email Body (Rich HTML Layout)
+                      </label>
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        Pasted links auto-hyperlink automatically
+                      </span>
+                    </div>
                     <div className="flex flex-col rounded-lg overflow-hidden border border-slate-850">
                       {/* Custom Editor Toolbar */}
                       <div className="bg-slate-950/80 px-4 py-2 border-b border-slate-850 flex flex-wrap gap-1 items-center">
@@ -1830,6 +2024,29 @@ export default function CampaignPage() {
                           title="Code Block"
                         >
                           Code
+                        </button>
+                        <span className="h-4 w-px bg-slate-800 mx-1" />
+                        <button
+                          type="button"
+                          onClick={handleOpenLinkModal}
+                          className={`px-2 py-1 rounded hover:bg-slate-800 text-xs transition-colors flex items-center gap-1 ${
+                            editor?.isActive("link") ? "bg-indigo-900/40 text-indigo-300 font-semibold" : "text-slate-400"
+                          }`}
+                          title="Attach Link (Insert or edit link)"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                          </svg>
+                          <span>Attach Link</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleInsertProfessionalFooter}
+                          className="px-2 py-1 rounded hover:bg-slate-800 text-xs text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1"
+                          title="Insert India Accelerator corporate signature into body"
+                        >
+                          <span>🖋️</span>
+                          <span>Insert Footer</span>
                         </button>
                         <span className="h-4 w-px bg-slate-800 mx-1" />
                         <button
@@ -1904,6 +2121,25 @@ export default function CampaignPage() {
                         ))}
                       </div>
                     )}
+                  </div>
+
+                  {/* Professional Corporate Footer Option Toggle */}
+                  <div className="flex items-start gap-3 bg-slate-950/20 border border-slate-850 p-4 rounded-xl">
+                    <input
+                      type="checkbox"
+                      id="footerToggle"
+                      checked={footerEnabled}
+                      onChange={(e) => setFooterEnabled(e.target.checked)}
+                      className="mt-0.5 rounded border-slate-800 text-indigo-650 bg-slate-950 focus:ring-indigo-500 focus:ring-offset-0 w-4 h-4 cursor-pointer"
+                    />
+                    <div className="space-y-1">
+                      <label htmlFor="footerToggle" className="block text-xs font-semibold text-slate-200 cursor-pointer select-none">
+                        Attach Professional Footer (India Accelerator Signature)
+                      </label>
+                      <p className="text-[10px] text-slate-500 leading-normal font-serif">
+                        Appends your official corporate signature with India Accelerator logo, designation, MGF Metropolis Mall address, contact, and email.
+                      </p>
+                    </div>
                   </div>
 
                   {/* Unsubscribe Option Toggle */}
@@ -2089,10 +2325,10 @@ export default function CampaignPage() {
                       <span className="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1 font-mono">
                         Merged Email Body (HTML Render):
                       </span>
-                      <div className="bg-slate-900/40 p-3 rounded border border-slate-900 min-h-[160px] max-h-[300px] overflow-y-auto">
-                        {mergedBodyPreview ? (
+                      <div className="bg-slate-900/40 p-3 rounded border border-slate-900 min-h-[160px] max-h-[420px] overflow-y-auto">
+                        {previewBodyHtml ? (
                           <div
-                            dangerouslySetInnerHTML={{ __html: mergedBodyPreview }}
+                            dangerouslySetInnerHTML={{ __html: previewBodyHtml }}
                             className="prose prose-invert prose-xs text-xs text-slate-300 leading-relaxed font-sans max-w-none"
                           />
                         ) : (
@@ -2103,11 +2339,149 @@ export default function CampaignPage() {
                   </div>
                   {/* Tracking unreliability note */}
                   <div className="bg-slate-950/40 border border-slate-900 rounded-lg p-3 text-[10px] text-slate-500 leading-normal">
-                    <strong className="text-slate-400">Note on Open Tracking:</strong> Pixel-based open tracking is approximate and subject to inflation (e.g. Apple Mail Privacy Protection pre-fetching) or suppression (e.g. Gmail image proxies or users blocking remote images).
+                    <strong className="text-slate-400">Note on Open Tracking:</strong> Pixel-based open tracking is approximate and subject to inflation (e.g. Apple Mail Privacy Protection pre-fetching) or suppression (e.g. Gmail image proxies or users blocking remote images). All links are sent directly with zero ngrok redirection.
                   </div>
                 </div>
 
               </div>
+
+              {/* Link Attachment Modal */}
+              {isLinkModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+                    <div className="flex items-center justify-between border-b border-slate-850 pb-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                          </svg>
+                        </div>
+                        <h3 className="text-sm font-semibold text-slate-100">Attach Hyperlink</h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsLinkModalOpen(false)}
+                        className="text-slate-400 hover:text-slate-200 text-lg leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {/* Quick Presets */}
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                          Quick Presets
+                        </label>
+                        <div className="flex flex-wrap gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLinkUrl("https://www.linkedin.com/in/")
+                              if (!linkText) setLinkText("LinkedIn Profile")
+                            }}
+                            className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 hover:border-indigo-500 text-xs text-slate-300 hover:text-indigo-300 flex items-center gap-1.5 transition-colors"
+                          >
+                            <span>💼</span>
+                            <span>LinkedIn</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLinkUrl("https://calendly.com/")
+                              if (!linkText) setLinkText("Schedule a Call")
+                            }}
+                            className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 hover:border-indigo-500 text-xs text-slate-300 hover:text-indigo-300 flex items-center gap-1.5 transition-colors"
+                          >
+                            <span>📅</span>
+                            <span>Calendly</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLinkUrl("https://www.indiaaccelerator.co")
+                              if (!linkText) setLinkText("India Accelerator")
+                            }}
+                            className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 hover:border-indigo-500 text-xs text-slate-300 hover:text-indigo-300 flex items-center gap-1.5 transition-colors"
+                          >
+                            <span>🚀</span>
+                            <span>India Accelerator</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Display Text Field */}
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                          Display Text
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. My LinkedIn Profile"
+                          value={linkText}
+                          onChange={(e) => setLinkText(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-500 font-sans"
+                        />
+                      </div>
+
+                      {/* Target URL Field */}
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                          Target URL (Direct Hyperlink)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="https://www.linkedin.com/in/..."
+                          value={linkUrl}
+                          onChange={(e) => setLinkUrl(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault()
+                              handleSaveLink()
+                            }
+                          }}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-500 font-mono"
+                          autoFocus
+                        />
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          This link goes directly to destination with no ngrok wrapping, avoiding redirect errors.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-850">
+                      <div>
+                        {editor?.isActive("link") && (
+                          <button
+                            type="button"
+                            onClick={handleRemoveLink}
+                            className="text-xs text-rose-400 hover:text-rose-300 underline font-medium"
+                          >
+                            Remove Link
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setIsLinkModalOpen(false)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-medium"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSaveLink}
+                          disabled={!linkUrl.trim()}
+                          className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs text-white font-semibold transition-all shadow"
+                        >
+                          Attach Link
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

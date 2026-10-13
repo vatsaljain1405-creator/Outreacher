@@ -12,7 +12,7 @@ export async function GET() {
       from: "sender@test.com",
       subject: "Test Subject",
       htmlBody: "<p>Hello World</p>",
-      unsubscribeLink: "http://localhost:3000/api/unsubscribe/123",
+      unsubscribeLink: "http://localhost:3001/api/unsubscribe/123",
       attachmentsList: [
         {
           name: "test.txt",

@@ -1,9 +1,11 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo } from "react"
 import Link from "next/link"
 import { useEditor, EditorContent } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
+import TiptapLink from "@tiptap/extension-link"
+import { getProfessionalFooterHtml, hasProfessionalFooter } from "@/lib/footer"
 import { saveTemplateAction, deleteTemplateAction, getTemplatesAction } from "./actions"
 
 export interface CampaignData {
@@ -27,6 +29,7 @@ export interface TemplateData {
   fallbacks: Record<string, string>
   createdAt: Date
   unsubscribeEnabled?: boolean
+  footerEnabled?: boolean
   attachments?: Array<{ name: string; mimeType: string; size: number; content: string }>
 }
 
@@ -54,6 +57,10 @@ export default function TemplatePageClient({
   const [bodyHtml, setBodyHtml] = useState("<p>Dear {First Name},</p><p>We are excited to work with you at {Company}!</p>")
   const [fallbacks, setFallbacks] = useState<Record<string, string>>({})
   const [unsubscribeEnabled, setUnsubscribeEnabled] = useState(false)
+  const [footerEnabled, setFooterEnabled] = useState(true)
+  const [isLinkModalOpen, setIsLinkModalOpen] = useState(false)
+  const [linkUrl, setLinkUrl] = useState("")
+  const [linkText, setLinkText] = useState("")
   const [attachmentsList, setAttachmentsList] = useState<Array<{ name: string; mimeType: string; size: number; content: string }>>([])
 
   // Target Focus Tracking
@@ -67,7 +74,19 @@ export default function TemplatePageClient({
 
   // TipTap Rich Text Editor Configuration
   const editor = useEditor({
-    extensions: [StarterKit],
+    extensions: [
+      StarterKit,
+      TiptapLink.configure({
+        openOnClick: false,
+        autolink: true,
+        defaultProtocol: "https",
+        HTMLAttributes: {
+          target: "_blank",
+          rel: "noopener noreferrer",
+          class: "text-indigo-400 underline font-medium cursor-pointer",
+        },
+      }),
+    ],
     content: bodyHtml,
     editorProps: {
       attributes: {
@@ -78,6 +97,62 @@ export default function TemplatePageClient({
       setBodyHtml(editor.getHTML())
     },
   })
+
+  // Open Link Modal with pre-filled selection or active URL
+  const handleOpenLinkModal = () => {
+    if (!editor) return
+    const previousUrl = editor.getAttributes("link").href || ""
+    const { from, to } = editor.state.selection
+    const selectedText = editor.state.doc.textBetween(from, to, " ")
+    setLinkUrl(previousUrl)
+    setLinkText(selectedText)
+    setIsLinkModalOpen(true)
+  }
+
+  // Insert or Update Link in Editor
+  const handleSaveLink = () => {
+    if (!editor) return
+    if (!linkUrl.trim()) {
+      editor.chain().focus().extendMarkRange("link").unsetLink().run()
+      setIsLinkModalOpen(false)
+      return
+    }
+
+    let formattedUrl = linkUrl.trim()
+    if (
+      !formattedUrl.match(/^https?:\/\//i) &&
+      !formattedUrl.startsWith("mailto:") &&
+      !formattedUrl.startsWith("tel:")
+    ) {
+      formattedUrl = `https://${formattedUrl}`
+    }
+
+    const { from, to } = editor.state.selection
+    const hasSelection = from !== to
+
+    if (hasSelection) {
+      editor.chain().focus().extendMarkRange("link").setLink({ href: formattedUrl }).run()
+    } else if (linkText.trim()) {
+      editor.chain().focus().insertContent(`<a href="${formattedUrl}">${linkText.trim()}</a>`).run()
+    } else {
+      editor.chain().focus().insertContent(`<a href="${formattedUrl}">${formattedUrl}</a>`).run()
+    }
+    setIsLinkModalOpen(false)
+  }
+
+  // Unset / Remove Link
+  const handleRemoveLink = () => {
+    if (!editor) return
+    editor.chain().focus().extendMarkRange("link").unsetLink().run()
+    setIsLinkModalOpen(false)
+  }
+
+  // Insert corporate signature directly into editor body
+  const handleInsertProfessionalFooter = () => {
+    if (!editor) return
+    const footerHtml = getProfessionalFooterHtml({ forEmail: false })
+    editor.chain().focus().insertContent(`<p><br /></p>${footerHtml}`).run()
+  }
 
   // Synchronize editor content when loading a new template profile
   useEffect(() => {
@@ -179,6 +254,7 @@ export default function TemplatePageClient({
       setBodyHtml("<p>Dear {First Name},</p><p>We are excited to work with you at {Company}!</p>")
       setFallbacks({})
       setUnsubscribeEnabled(false)
+      setFooterEnabled(true)
       setAttachmentsList([])
       return
     }
@@ -196,6 +272,7 @@ export default function TemplatePageClient({
       setBodyHtml(template.body)
       setFallbacks(template.fallbacks || {})
       setUnsubscribeEnabled(template.unsubscribeEnabled || false)
+      setFooterEnabled(template.footerEnabled !== false)
       setAttachmentsList(template.attachments || [])
     }
   }
@@ -220,7 +297,8 @@ export default function TemplatePageClient({
         bodyHtml,
         fallbacks,
         unsubscribeEnabled,
-        attachmentsList
+        attachmentsList,
+        footerEnabled
       )
 
       if (res.success) {
@@ -316,6 +394,22 @@ export default function TemplatePageClient({
   const activeRecipient = recipients.find((r) => r.id === selectedRecipientId)
   const mergedSubjectPreview = mergeTokens(subject, activeRecipient)
   const mergedBodyPreview = mergeTokens(bodyHtml, activeRecipient)
+
+  const previewBodyHtml = useMemo(() => {
+    let html = mergedBodyPreview || ""
+    if (footerEnabled && !hasProfessionalFooter(html)) {
+      html += `\n` + getProfessionalFooterHtml({ forEmail: false })
+    }
+    if (unsubscribeEnabled) {
+      html += `
+        <div style="margin-top: 30px; padding-top: 15px; border-top: 1px solid #334155; text-align: center; font-family: sans-serif; font-size: 11px; color: #94a3b8;">
+          You are receiving this because you are on our list. 
+          <a href="#" style="color: #818cf8; text-decoration: underline; margin-left: 5px;">Unsubscribe here</a>
+        </div>
+      `
+    }
+    return html
+  }, [mergedBodyPreview, footerEnabled, unsubscribeEnabled])
 
   return (
     <div className="relative z-10 w-full max-w-6xl grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -423,6 +517,30 @@ export default function TemplatePageClient({
                   {"{"}{header}{"}"}
                 </button>
               ))}
+
+              <span className="h-5 w-px bg-slate-800 self-center mx-1" />
+
+              <button
+                type="button"
+                onClick={handleOpenLinkModal}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-950/70 border border-indigo-500/40 hover:border-indigo-400 text-indigo-300 font-sans text-[11px] font-medium hover:text-white transition-colors shadow-sm"
+                title="Attach a direct link or LinkedIn profile"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+                <span>Attach Link</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleInsertProfessionalFooter}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-900 border border-slate-750 hover:border-slate-600 text-slate-300 font-sans text-[11px] font-medium hover:text-white transition-colors shadow-sm"
+                title="Insert India Accelerator corporate signature into body"
+              >
+                <span>🖋️</span>
+                <span>Insert Footer</span>
+              </button>
             </div>
           </div>
 
@@ -444,9 +562,14 @@ export default function TemplatePageClient({
 
           {/* TipTap Rich Body Editor */}
           <div>
-            <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-              Email Body (Rich HTML Layout)
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                Email Body (Rich HTML Layout)
+              </label>
+              <span className="text-[10px] text-slate-500 font-mono">
+                Pasted links auto-hyperlink automatically
+              </span>
+            </div>
             <div className="flex flex-col rounded-lg overflow-hidden border border-slate-800">
               {/* Custom Editor Toolbar */}
               <div className="bg-slate-950/80 px-4 py-2 border-b border-slate-800/80 flex flex-wrap gap-1 items-center">
@@ -500,6 +623,29 @@ export default function TemplatePageClient({
                   title="Code Block"
                 >
                   Code
+                </button>
+                <span className="h-4 w-px bg-slate-800 mx-1" />
+                <button
+                  type="button"
+                  onClick={handleOpenLinkModal}
+                  className={`px-2 py-1 rounded hover:bg-slate-800 text-xs transition-colors flex items-center gap-1 ${
+                    editor?.isActive("link") ? "bg-indigo-900/40 text-indigo-300 font-semibold" : "text-slate-400"
+                  }`}
+                  title="Attach Link (Insert or edit link)"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                  <span>Attach Link</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleInsertProfessionalFooter}
+                  className="px-2 py-1 rounded hover:bg-slate-800 text-xs text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1"
+                  title="Insert India Accelerator corporate signature into body"
+                >
+                  <span>🖋️</span>
+                  <span>Insert Footer</span>
                 </button>
                 <span className="h-4 w-px bg-slate-800 mx-1" />
                 <button
@@ -574,6 +720,25 @@ export default function TemplatePageClient({
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Professional Corporate Footer Option Toggle */}
+          <div className="flex items-start gap-3 bg-slate-950/20 border border-slate-850 p-4 rounded-xl">
+            <input
+              type="checkbox"
+              id="footerToggle"
+              checked={footerEnabled}
+              onChange={(e) => setFooterEnabled(e.target.checked)}
+              className="mt-0.5 rounded border-slate-800 text-indigo-650 bg-slate-950 focus:ring-indigo-500 focus:ring-offset-0 w-4 h-4 cursor-pointer"
+            />
+            <div className="space-y-1">
+              <label htmlFor="footerToggle" className="block text-xs font-semibold text-slate-200 cursor-pointer select-none">
+                Attach Professional Footer (India Accelerator Signature)
+              </label>
+              <p className="text-[10px] text-slate-500 leading-normal font-serif">
+                Appends your official corporate signature with India Accelerator logo, designation, MGF Metropolis Mall address, contact, and email.
+              </p>
+            </div>
           </div>
 
           {/* Unsubscribe Option Toggle */}
@@ -706,10 +871,10 @@ export default function TemplatePageClient({
               <span className="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1 font-mono">
                 Merged Email Body (HTML Render):
               </span>
-              <div className="bg-slate-900/40 p-3 rounded border border-slate-900 min-h-[160px] max-h-[300px] overflow-y-auto">
-                {mergedBodyPreview ? (
+              <div className="bg-slate-900/40 p-3 rounded border border-slate-900 min-h-[160px] max-h-[420px] overflow-y-auto">
+                {previewBodyHtml ? (
                   <div
-                    dangerouslySetInnerHTML={{ __html: mergedBodyPreview }}
+                    dangerouslySetInnerHTML={{ __html: previewBodyHtml }}
                     className="prose prose-invert prose-xs text-xs text-slate-300 leading-relaxed font-sans max-w-none"
                   />
                 ) : (
@@ -721,6 +886,144 @@ export default function TemplatePageClient({
         </div>
 
       </div>
+
+      {/* Link Attachment Modal */}
+      {isLinkModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-850 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                </div>
+                <h3 className="text-sm font-semibold text-slate-100">Attach Hyperlink</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLinkModalOpen(false)}
+                className="text-slate-400 hover:text-slate-200 text-lg leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {/* Quick Presets */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                  Quick Presets
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkUrl("https://www.linkedin.com/in/")
+                      if (!linkText) setLinkText("LinkedIn Profile")
+                    }}
+                    className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 hover:border-indigo-500 text-xs text-slate-300 hover:text-indigo-300 flex items-center gap-1.5 transition-colors"
+                  >
+                    <span>💼</span>
+                    <span>LinkedIn</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkUrl("https://calendly.com/")
+                      if (!linkText) setLinkText("Schedule a Call")
+                    }}
+                    className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 hover:border-indigo-500 text-xs text-slate-300 hover:text-indigo-300 flex items-center gap-1.5 transition-colors"
+                  >
+                    <span>📅</span>
+                    <span>Calendly</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkUrl("https://www.indiaaccelerator.co")
+                      if (!linkText) setLinkText("India Accelerator")
+                    }}
+                    className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 hover:border-indigo-500 text-xs text-slate-300 hover:text-indigo-300 flex items-center gap-1.5 transition-colors"
+                  >
+                    <span>🚀</span>
+                    <span>India Accelerator</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Display Text Field */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                  Display Text
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. My LinkedIn Profile"
+                  value={linkText}
+                  onChange={(e) => setLinkText(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-500 font-sans"
+                />
+              </div>
+
+              {/* Target URL Field */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                  Target URL (Direct Hyperlink)
+                </label>
+                <input
+                  type="text"
+                  placeholder="https://www.linkedin.com/in/..."
+                  value={linkUrl}
+                  onChange={(e) => setLinkUrl(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      handleSaveLink()
+                    }
+                  }}
+                  className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-500 font-mono"
+                  autoFocus
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  This link goes directly to destination with no ngrok wrapping, avoiding redirect errors.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-850">
+              <div>
+                {editor?.isActive("link") && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveLink}
+                    className="text-xs text-rose-400 hover:text-rose-300 underline font-medium"
+                  >
+                    Remove Link
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsLinkModalOpen(false)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveLink}
+                  disabled={!linkUrl.trim()}
+                  className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs text-white font-semibold transition-all shadow"
+                >
+                  Attach Link
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,8 +1,12 @@
+import fs from "fs"
+import path from "path"
 import { db } from "@/db"
 import { campaigns, recipients, templates, attachments, users, events } from "@/db/schema"
 import { getValidGoogleToken } from "@/lib/tokens"
-import { buildMimeMessage } from "@/lib/mime"
+import { buildMimeMessage, InlineImage } from "@/lib/mime"
 import { eq, and } from "drizzle-orm"
+import { getActiveBaseUrl } from "@/lib/base-url"
+import { getProfessionalFooterHtml, hasProfessionalFooter } from "@/lib/footer"
 
 /**
  * Helper token-replacement merge utility
@@ -39,18 +43,6 @@ function mergeTokens(
   return merged
 }
 
-/**
- * Helper to rewrite regular links inside HTML to go through tracking redirection endpoint.
- */
-function rewriteHtmlLinks(html: string, recipientId: string, baseUrl: string): string {
-  return html.replace(/<a\s+([^>]*?\s+)?href="([^"]*)"/gi, (match, before, url) => {
-    if (!url || url.startsWith("#") || url.startsWith("mailto:") || url.startsWith("tel:") || url.startsWith("javascript:")) {
-      return match
-    }
-    const trackingUrl = `${baseUrl}/api/track/click/${recipientId}?url=${encodeURIComponent(url)}`
-    return `<a ${before || ""}href="${trackingUrl}"`
-  })
-}
 
 /**
  * Helper to append a 1x1 transparent tracking pixel image.
@@ -70,7 +62,8 @@ function injectOpenTrackingPixel(html: string, recipientId: string, baseUrl: str
 function applyTracking(html: string, recipientId: string, baseUrl: string): string {
   const styleBlock = `<style>p { margin: 0 0 10px 0 !important; padding: 0 !important; }</style>`
   let trackedHtml = styleBlock + html
-  trackedHtml = rewriteHtmlLinks(trackedHtml, recipientId, baseUrl)
+  // Note: Link click rewriting through ngrok /api/track/click has been removed as requested.
+  // Links remain pure, direct links (e.g. LinkedIn profiles) to eliminate ngrok errors.
   trackedHtml = injectOpenTrackingPixel(trackedHtml, recipientId, baseUrl)
   return trackedHtml
 }
@@ -155,7 +148,41 @@ export async function executeCampaignSend(
     let isFirst = true
 
     // Loop recipients and send
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
     for (const rec of pendingRecipients) {
+      // Validate and recover recipient email
+      let targetEmail = (rec.email || "").trim()
+
+      if (!emailRegex.test(targetEmail)) {
+        // Attempt recovery from rec.fields
+        let recoveredEmail: string | null = null
+        if (rec.fields && typeof rec.fields === "object") {
+          for (const val of Object.values(rec.fields as Record<string, unknown>)) {
+            if (typeof val === "string" && emailRegex.test(val.trim())) {
+              recoveredEmail = val.trim()
+              break
+            }
+          }
+        }
+
+        if (recoveredEmail) {
+          console.log(`[Campaign Sender] Auto-recovered email "${recoveredEmail}" for recipient ID ${rec.id} (previously "${rec.email}")`)
+          targetEmail = recoveredEmail
+          await db
+            .update(recipients)
+            .set({ email: recoveredEmail })
+            .where(eq(recipients.id, rec.id))
+        } else {
+          console.warn(`[Campaign Sender] Skipping recipient ID ${rec.id}: Invalid or missing email address "${rec.email}"`)
+          await db
+            .update(recipients)
+            .set({ status: `failed: Invalid or missing email address (${rec.email || "empty"})` })
+            .where(eq(recipients.id, rec.id))
+          failedCount++
+          continue
+        }
+      }
+
       if (!isFirst) {
         console.log(`[Campaign Sender] Waiting 5 seconds before sending next email to prevent spam...`)
         await new Promise((resolve) => setTimeout(resolve, 5000))
@@ -165,10 +192,16 @@ export async function executeCampaignSend(
       try {
         // Merge variables into Subject and HTML Body
         const mergedSubject = mergeTokens(template.subject, campaign.headers, rec.fields, template.fallbacks || {})
-        const mergedBody = mergeTokens(template.body, campaign.headers, rec.fields, template.fallbacks || {})
+        let mergedBody = mergeTokens(template.body, campaign.headers, rec.fields, template.fallbacks || {})
 
-        // Inject open tracking pixel and rewrite links for click tracking
-        const baseUrl = (process.env.NEXTAUTH_URL || "http://localhost:3000").replace(/\/$/, "")
+        // Inject professional corporate footer if enabled and not already embedded
+        const isFooterEnabled = template.footerEnabled !== false
+        if (isFooterEnabled && !hasProfessionalFooter(mergedBody)) {
+          mergedBody += `\n` + getProfessionalFooterHtml({ forEmail: true })
+        }
+
+        // Inject open tracking pixel
+        const { baseUrl } = await getActiveBaseUrl()
         let trackedBody = applyTracking(mergedBody, rec.id, baseUrl)
 
         // Inject unsubscribe footer
@@ -183,14 +216,37 @@ export async function executeCampaignSend(
           `
         }
 
+        // Replace any relative /ia-logo.png reference with cid:ia-logo@outreacher for email clients
+        trackedBody = trackedBody.replace(/src="\/ia-logo\.png"/g, 'src="cid:ia-logo@outreacher"')
+
+        // Load inline CID images (e.g. India Accelerator logo)
+        const inlineImages: InlineImage[] = []
+        if (trackedBody.includes("cid:ia-logo@outreacher")) {
+          try {
+            const logoPath = path.join(process.cwd(), "public", "ia-logo.png")
+            if (fs.existsSync(logoPath)) {
+              const logoBuf = fs.readFileSync(logoPath)
+              inlineImages.push({
+                cid: "ia-logo@outreacher",
+                filename: "ia-logo.png",
+                mimeType: "image/png",
+                content: logoBuf.toString("base64"),
+              })
+            }
+          } catch (logoErr) {
+            console.warn("[Campaign Sender] Failed to load inline logo for email:", logoErr)
+          }
+        }
+
         // Construct MIME standard RFC 2822 message
         const rawMime = buildMimeMessage({
-          to: rec.email,
+          to: targetEmail,
           from: userEmail,
           subject: mergedSubject,
           htmlBody: trackedBody,
           unsubscribeLink,
           attachmentsList: tplAttachments,
+          inlineImages,
         })
 
         const base64UrlMessage = Buffer.from(rawMime)
@@ -333,9 +389,16 @@ export async function executeSyncReplies(
 
         if (!response.ok) {
           const apiError = await response.text()
+          if (response.status === 429 || response.status === 403) {
+            console.warn(`[Reply Sync Paused] Gmail API rate limit / quota exceeded (${response.status}). Pausing reply sync to protect API quota.`)
+            break
+          }
           console.warn(`[Reply Sync Warning] Failed to fetch thread ${threadId}: ${apiError}`)
           continue
         }
+
+        // 200ms throttle between thread requests to prevent exceeding Gmail quota
+        await new Promise((resolve) => setTimeout(resolve, 200))
 
         const threadData = await response.json()
         const messages = threadData.messages || []

@@ -2,7 +2,7 @@
 import { db } from "@/db"
 import { campaigns, recipients } from "@/db/schema"
 import { executeCampaignSend, executeSyncReplies } from "@/lib/campaign-sender"
-import { eq, and, lte, isNotNull, or } from "drizzle-orm"
+import { eq, and, lte, isNotNull } from "drizzle-orm"
 
 // Declare global properties for dev server hot-reloading preservation
 declare global {
@@ -98,18 +98,19 @@ async function checkAndSyncReplies() {
       return;
     }
 
-    console.log(`[Scheduler] Found ${uniqueCampaignIds.length} campaigns with active sent threads to sync replies.`);
+    // Limit to 3 active campaigns per cycle to stay well within Google API quotas
+    const campaignsToSync = uniqueCampaignIds.slice(-3);
+    console.log(`[Scheduler] Syncing replies for ${campaignsToSync.length} recent campaign(s)...`);
 
-    for (const campaignId of uniqueCampaignIds) {
-      executeSyncReplies(campaignId)
-        .then((res) => {
-          if (res.success && res.repliesCount > 0) {
-            console.log(`[Scheduler Reply Sync Success] Campaign ${campaignId}: detected ${res.repliesCount} new replies.`);
-          }
-        })
-        .catch((err) => {
-          console.error(`[Scheduler Reply Sync Error] Failed to sync replies for campaign ${campaignId}:`, err);
-        });
+    for (const campaignId of campaignsToSync) {
+      try {
+        const res = await executeSyncReplies(campaignId);
+        if (res && res.success && res.repliesCount > 0) {
+          console.log(`[Scheduler Reply Sync Success] Campaign ${campaignId}: detected ${res.repliesCount} new replies.`);
+        }
+      } catch (err) {
+        console.error(`[Scheduler Reply Sync Error] Failed to sync replies for campaign ${campaignId}:`, err);
+      }
     }
   } catch (error) {
     console.error("[Scheduler Error] checkAndSyncReplies execution failed:", error);
@@ -121,16 +122,18 @@ if (process.env.NEXT_PHASE === "phase-production-build") {
   console.log("[Scheduler] Next.js production build phase detected. Skipping background scheduler initialization.");
 } else if (!globalThis.schedulerActive) {
   globalThis.schedulerActive = true;
-  console.log("[Scheduler] Initializing background email scheduler & reply sync (interval: 60s)...");
+  console.log("[Scheduler] Initializing background email scheduler & reply sync (interval: 5m)...");
   
-  // Run once immediately on startup
-  checkAndSendScheduledCampaigns();
-  checkAndSyncReplies();
+  // Delay initial run by 30 seconds after server start so dev server finishes loading
+  setTimeout(() => {
+    checkAndSendScheduledCampaigns();
+    checkAndSyncReplies();
+  }, 30 * 1000);
 
-  // Poll every 60 seconds
+  // Poll every 5 minutes
   setInterval(() => {
     checkAndSendScheduledCampaigns();
     checkAndSyncReplies();
-  }, 60 * 1000);
+  }, 5 * 60 * 1000);
 }
 export {};

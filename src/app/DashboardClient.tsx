@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect } from "react"
 import Link from "next/link"
-import { syncAllRepliesAction } from "@/app/campaign/actions"
+import { syncAllRepliesAction, deleteCampaignAction } from "@/app/campaign/actions"
 
 interface CampaignItem {
   id: string
@@ -47,6 +47,65 @@ export default function DashboardClient({
   const [activeModal, setActiveModal] = useState<"analytics" | "tracking" | null>(null)
   const [trackingFilter, setTrackingFilter] = useState<"all" | "open" | "click" | "reply">("all")
   const [trackingSearch, setTrackingSearch] = useState("")
+  const [isNoticeDismissed, setIsNoticeDismissed] = useState(false)
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && localStorage.getItem("outreacher_dismiss_localhost_notice") === "true") {
+      setIsNoticeDismissed(true)
+    }
+  }, [])
+
+  const handleDismissNotice = () => {
+    setIsNoticeDismissed(true)
+    if (typeof window !== "undefined") {
+      localStorage.setItem("outreacher_dismiss_localhost_notice", "true")
+    }
+  }
+  
+  // Campaign search & pagination states
+  const [campaignSearch, setCampaignSearch] = useState("")
+  const [currentPage, setCurrentPage] = useState(1)
+  const [loadingCampaignId, setLoadingCampaignId] = useState<string | null>(null)
+  const itemsPerPage = 5
+
+  // Filtered & Paginated campaigns
+  const filteredCampaigns = useMemo(() => {
+    return campaignsList.filter((c) =>
+      c.name.toLowerCase().includes(campaignSearch.toLowerCase())
+    )
+  }, [campaignsList, campaignSearch])
+
+  const totalPages = Math.ceil(filteredCampaigns.length / itemsPerPage) || 1
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const paginatedCampaigns = useMemo(() => {
+    return filteredCampaigns.slice(startIndex, endIndex)
+  }, [filteredCampaigns, startIndex, endIndex])
+
+  const handleDeleteCampaign = async (campaignId: string) => {
+    if (!confirm("Are you sure you want to permanently delete this draft campaign? This will clean up all imported recipients and templates.")) {
+      return
+    }
+    setLoadingCampaignId(campaignId)
+    setSyncMessage("Deleting draft campaign...")
+    try {
+      const res = await deleteCampaignAction(campaignId)
+      if (res.success) {
+        setSyncMessage("Campaign deleted successfully!")
+        setTimeout(() => {
+          window.location.reload()
+        }, 1000)
+      } else {
+        setSyncMessage(`Failed to delete campaign: ${res.error || "Unknown error"}`)
+      }
+    } catch (err) {
+      console.error("Delete campaign error:", err)
+      setSyncMessage("Failed to delete campaign. Check connection logs.")
+    } finally {
+      setLoadingCampaignId(null)
+      setTimeout(() => setSyncMessage(null), 5000)
+    }
+  }
   
   // Manual sync states
   const [isSyncing, setIsSyncing] = useState(false)
@@ -126,18 +185,29 @@ export default function DashboardClient({
         )}
 
         {/* Localhost Warning Banner */}
-        {isLocalhost && (
-          <div className="bg-amber-950/20 border border-amber-500/20 text-amber-200 text-xs rounded-2xl p-5 shadow-glow-amber animate-slide-down space-y-2">
-            <div className="flex items-center gap-2 font-bold text-amber-450">
-              <span className="text-base">⚠️</span>
-              <span>Local Host Environment Notice</span>
+        {isLocalhost && !isNoticeDismissed && (
+          <div className="bg-amber-950/20 border border-amber-500/20 text-amber-200 text-xs rounded-2xl p-5 shadow-glow-amber animate-slide-down space-y-2 relative">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-amber-450">
+                <span className="text-base">⚠️</span>
+                <span>Local Host Environment Notice</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleDismissNotice}
+                className="text-amber-400/80 hover:text-amber-300 text-[11px] px-2.5 py-1 rounded-lg border border-amber-500/30 hover:border-amber-500/60 bg-amber-950/40 cursor-pointer flex items-center gap-1.5 transition-all shadow-sm"
+                title="Dismiss this notice"
+              >
+                <span>Dismiss</span>
+                <span>✕</span>
+              </button>
             </div>
             <p className="text-slate-400 text-[11px] leading-relaxed">
               Your server base URL is currently set to <code className="text-amber-400 font-mono bg-slate-950 px-1 py-0.5 rounded">localhost</code> in <code className="text-slate-350 font-mono font-bold">.env.local</code>. 
               While background scheduling and reply detection function properly, <strong>actual email opens and clicks will not register</strong>. This is because {"Gmail's"} image servers and link redirects require a public address to communicate back to your computer.
             </p>
             <p className="text-slate-400 text-[11px] leading-relaxed">
-              To test open and click tracking locally: expose your local port via a secure tunnel (e.g., run <code className="text-slate-200 font-mono bg-slate-950 px-1.5 py-0.5 rounded">ngrok http 3000</code> in your terminal) and change <code className="text-slate-200 font-mono font-bold">NEXTAUTH_URL</code> to the generated HTTPS address.
+              To test open and click tracking locally: keep <code className="text-slate-200 font-mono bg-slate-950 px-1.5 py-0.5 rounded">ngrok http 3001</code> running in a terminal, add <code className="text-slate-200 font-mono font-bold">{'APP_URL="https://your-ngrok-domain.ngrok-free.app"'}</code> in <code className="text-slate-350 font-mono font-bold">.env.local</code>, and restart the dev server. Or click <strong>Dismiss</strong> if you are testing sequences, drafts, or reply tracking (which work 100% on localhost).
             </p>
           </div>
         )}
@@ -244,68 +314,124 @@ export default function DashboardClient({
 
         {/* Recent Campaigns Table */}
         <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-xl animate-slide-up animation-delay-450">
-          <div>
-            <h2 className="text-lg font-serif font-bold text-slate-200">Recent Sequences</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Showing your last 5 outreach campaigns and live status.</p>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div>
+              <h2 className="text-lg font-serif font-bold text-slate-200">Outreach Campaigns</h2>
+              <p className="text-xs text-slate-400 mt-0.5">Showing all your outreach campaigns and live status.</p>
+            </div>
+            <div className="w-full sm:w-auto">
+              <input
+                type="text"
+                placeholder="Search campaigns..."
+                value={campaignSearch}
+                onChange={(e) => {
+                  setCampaignSearch(e.target.value)
+                  setCurrentPage(1)
+                }}
+                className="bg-slate-950 border border-slate-800 text-xs text-slate-200 py-1.5 px-3 rounded-lg focus:outline-none focus:border-indigo-500 font-sans w-full sm:w-[220px]"
+              />
+            </div>
           </div>
 
           {campaignsList.length === 0 ? (
             <div className="py-12 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
               No campaigns created yet. Click &quot;+ New Campaign&quot; to launch your first sequence.
             </div>
+          ) : filteredCampaigns.length === 0 ? (
+            <div className="py-12 text-center text-slate-550 text-xs border border-dashed border-slate-800 rounded-xl">
+              No campaigns found matching &quot;{campaignSearch}&quot;.
+            </div>
           ) : (
-            <div className="overflow-x-auto border border-slate-800/80 rounded-xl bg-slate-950/20">
-              <table className="w-full text-xs text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-950/60 border-b border-slate-850 text-slate-400 font-semibold">
-                    <th className="p-3">Name</th>
-                    <th className="p-3">Recipients</th>
-                    <th className="p-3">Opens</th>
-                    <th className="p-3">Clicks</th>
-                    <th className="p-3">Replies</th>
-                    <th className="p-3">Status</th>
-                    <th className="p-3 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-850">
-                  {campaignsList.map((c) => (
-                    <tr key={c.id} className="hover:bg-slate-800/20 text-slate-300 hover:scale-[1.001] transition-all duration-200">
-                      <td className="p-3 font-semibold text-slate-100">{c.name}</td>
-                      <td className="p-3 font-mono text-[11px] text-slate-400">{c.recipientCount} rows</td>
-                      <td className="p-3 font-mono text-[11px] text-emerald-400">{c.opensCount} opens</td>
-                      <td className="p-3 font-mono text-[11px] text-indigo-300">{c.clicksCount || 0} clicks</td>
-                      <td className="p-3 font-mono text-[11px] text-pink-400">{c.repliesCount} replies</td>
-                      <td className="p-3">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border uppercase ${
-                          c.status === "completed"
-                            ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-                            : c.status === "scheduled"
-                            ? "bg-amber-500/10 border-amber-500/20 text-amber-400 shadow-glow-amber animate-pulse"
-                            : "bg-slate-800 border-slate-700 text-slate-400"
-                        }`}>
-                          {c.status}
-                        </span>
-                      </td>
-                      <td className="p-3 text-right flex items-center justify-end gap-2">
-                        {c.status === "completed" && (
-                          <Link
-                            href={`/campaign?parentCampaignId=${c.id}`}
-                            className="inline-block py-1 px-2.5 rounded-lg bg-pink-950 hover:bg-pink-900 border border-pink-500/30 hover:border-pink-400 text-pink-300 hover:text-pink-200 transition-all font-semibold text-[11px] active:scale-95"
-                          >
-                            Create Follow-up
-                          </Link>
-                        )}
-                        <Link
-                          href={`/campaign?id=${c.id}`}
-                          className="inline-block py-1 px-3 rounded-lg bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/30 hover:border-indigo-400 text-indigo-300 hover:text-indigo-200 transition-all font-semibold text-[11px] active:scale-95"
-                        >
-                          Setup Wizard
-                        </Link>
-                      </td>
+            <div className="space-y-4">
+              <div className="overflow-x-auto border border-slate-800/80 rounded-xl bg-slate-950/20">
+                <table className="w-full text-xs text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-950/60 border-b border-slate-850 text-slate-400 font-semibold">
+                      <th className="p-3">Name</th>
+                      <th className="p-3">Recipients</th>
+                      <th className="p-3">Opens</th>
+                      <th className="p-3">Clicks</th>
+                      <th className="p-3">Replies</th>
+                      <th className="p-3">Status</th>
+                      <th className="p-3 text-right">Action</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-850">
+                    {paginatedCampaigns.map((c) => (
+                      <tr key={c.id} className="hover:bg-slate-800/20 text-slate-300 hover:scale-[1.001] transition-all duration-200">
+                        <td className="p-3 font-semibold text-slate-100">{c.name}</td>
+                        <td className="p-3 font-mono text-[11px] text-slate-400">{c.recipientCount} rows</td>
+                        <td className="p-3 font-mono text-[11px] text-emerald-400">{c.opensCount} opens</td>
+                        <td className="p-3 font-mono text-[11px] text-indigo-300">{c.clicksCount || 0} clicks</td>
+                        <td className="p-3 font-mono text-[11px] text-pink-400">{c.repliesCount} replies</td>
+                        <td className="p-3">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border uppercase ${
+                            c.status === "completed"
+                              ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                              : c.status === "scheduled"
+                              ? "bg-amber-500/10 border-amber-500/20 text-amber-400 shadow-glow-amber animate-pulse"
+                              : "bg-slate-800 border-slate-700 text-slate-400"
+                          }`}>
+                            {c.status}
+                          </span>
+                        </td>
+                        <td className="p-3 text-right flex items-center justify-end gap-2">
+                          {c.status === "completed" && (
+                            <Link
+                              href={`/campaign?parentCampaignId=${c.id}`}
+                              className="inline-block py-1 px-2.5 rounded-lg bg-pink-950 hover:bg-pink-900 border border-pink-500/30 hover:border-pink-400 text-pink-300 hover:text-pink-200 transition-all font-semibold text-[11px] active:scale-95"
+                            >
+                              Create Follow-up
+                            </Link>
+                          )}
+                          {c.status === "draft" && (
+                            <button
+                              onClick={() => handleDeleteCampaign(c.id)}
+                              disabled={loadingCampaignId === c.id}
+                              className="inline-block py-1 px-2.5 rounded-lg bg-rose-500/10 hover:bg-rose-600 border border-rose-500/30 hover:border-rose-550 text-rose-450 hover:text-white transition-all text-[11px] font-semibold active:scale-95 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                            >
+                              {loadingCampaignId === c.id ? "Deleting..." : "Delete"}
+                            </button>
+                          )}
+                          <Link
+                            href={`/campaign?id=${c.id}`}
+                            className="inline-block py-1 px-3 rounded-lg bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/30 hover:border-indigo-400 text-indigo-300 hover:text-indigo-200 transition-all font-semibold text-[11px] active:scale-95"
+                          >
+                            Setup Wizard
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between pt-2 text-xs text-slate-400">
+                  <span>
+                    Showing <strong className="text-slate-200">{startIndex + 1}</strong> to{" "}
+                    <strong className="text-slate-200">{Math.min(endIndex, filteredCampaigns.length)}</strong> of{" "}
+                    <strong className="text-slate-200">{filteredCampaigns.length}</strong> campaigns
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                      className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-750 hover:text-white disabled:opacity-40 disabled:hover:text-slate-400 transition-all font-semibold cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                      className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-750 hover:text-white disabled:opacity-40 disabled:hover:text-slate-400 transition-all font-semibold cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

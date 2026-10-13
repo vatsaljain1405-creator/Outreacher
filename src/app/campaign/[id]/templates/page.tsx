@@ -52,6 +52,7 @@ export default async function TemplatesPage({ params }: TemplatesPageProps) {
           body: templates.body,
           fallbacks: templates.fallbacks,
           unsubscribeEnabled: templates.unsubscribeEnabled,
+          footerEnabled: templates.footerEnabled,
           createdAt: templates.createdAt,
         })
         .from(templates)

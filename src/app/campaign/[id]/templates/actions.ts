@@ -25,7 +25,8 @@ export async function saveTemplateAction(
   body: string,
   fallbacks: Record<string, string>,
   unsubscribeEnabled: boolean,
-  attachmentsData?: Array<{ name: string; mimeType: string; size: number; content: string }>
+  attachmentsData?: Array<{ name: string; mimeType: string; size: number; content: string }>,
+  footerEnabled: boolean = true
 ): Promise<TemplateResult> {
   try {
     const session = await auth()
@@ -60,6 +61,7 @@ export async function saveTemplateAction(
           body,
           fallbacks,
           unsubscribeEnabled,
+          footerEnabled,
         })
         .where(eq(templates.id, resolvedId))
     } else {
@@ -72,6 +74,7 @@ export async function saveTemplateAction(
         body,
         fallbacks,
         unsubscribeEnabled,
+        footerEnabled,
       })
     }
 
@@ -155,6 +158,7 @@ export async function getTemplatesAction(campaignId: string): Promise<TemplateRe
         body: templates.body,
         fallbacks: templates.fallbacks,
         unsubscribeEnabled: templates.unsubscribeEnabled,
+        footerEnabled: templates.footerEnabled,
         createdAt: templates.createdAt,
       })
       .from(templates)

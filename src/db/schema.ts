@@ -108,6 +108,7 @@ export const templates = sqliteTable("template", {
   body: text("body").notNull(),
   fallbacks: text("fallbacks", { mode: "json" }).$type<Record<string, string>>().notNull(),
   unsubscribeEnabled: integer("unsubscribeEnabled", { mode: "boolean" }).default(false).notNull(),
+  footerEnabled: integer("footerEnabled", { mode: "boolean" }).default(true).notNull(),
   createdAt: integer("createdAt", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
